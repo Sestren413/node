@@ -1105,6 +1105,45 @@ static void WriteBuffers(const FunctionCallbackInfo<Value>& args) {
 }
 
 
+// Wrapper for readv(2).
+//
+// bytesWritten = writev(fd, chunks, position, callback)
+// 0 fd        integer. file descriptor
+// 1 chunks    array of buffers to write
+// 2 position  if integer, position to write at in the file.
+//             if null, write from the current position
+static void ReadBuffers(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+
+  CHECK(args[0]->IsInt32());
+  CHECK(args[1]->IsArray());
+
+  int fd = args[0]->Int32Value();
+  Local<Array> chunks = args[1].As<Array>();
+  int64_t pos = GET_OFFSET(args[2]);
+  Local<Value> req = args[3];
+
+  MaybeStackBuffer<uv_buf_t> iovs(chunks->Length());
+
+  for (uint32_t i = 0; i < iovs.length(); i++) {
+    Local<Value> chunk = chunks->Get(i);
+
+    if (!Buffer::HasInstance(chunk))
+      return env->ThrowTypeError("Array elements all need to be buffers");
+
+    iovs[i] = uv_buf_init(Buffer::Data(chunk), Buffer::Length(chunk));
+  }
+
+  if (req->IsObject()) {
+    ASYNC_CALL(read, req, UTF8, fd, *iovs, iovs.length(), pos)
+    return;
+  }
+
+  SYNC_CALL(read, nullptr, fd, *iovs, iovs.length(), pos)
+  args.GetReturnValue().Set(SYNC_RESULT);
+}
+
+
 // Wrapper for write(2).
 //
 // bytesWritten = write(fd, string, position, enc, callback)
@@ -1553,6 +1592,7 @@ void InitFs(Local<Object> target,
   env->SetMethod(target, "open", Open);
   env->SetMethod(target, "read", Read);
   env->SetMethod(target, "readBatch", ReadBatch);
+  env->SetMethod(target, "readBuffers", ReadBuffers);
   env->SetMethod(target, "fdatasync", Fdatasync);
   env->SetMethod(target, "fsync", Fsync);
   env->SetMethod(target, "rename", Rename);
