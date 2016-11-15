@@ -1312,6 +1312,100 @@ static void ReadBatch(const FunctionCallbackInfo<Value>& args) {
   return;
 }
 
+/*
+ * Wrapper for io_submit(2).
+ *
+ * bytesRead = fs.write(fd, buffer, nr, offset, length, position)
+ *
+ * Arrays of all of the below save nr
+ *
+ * 0 fd        integer. file descriptor
+ * 1 buffer    instance of Buffer
+ * 2 nr        integer. number of requests
+ * 3 offset    integer. offset to start writing into inside buffer
+ * 4 length    integer. length to write
+ * 5 position  file position - null for current position
+ *
+ */
+static void WriteBatch(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+
+  if (args.Length() < 3)
+    return TYPE_ERROR("fd, buffer and nr are required");
+
+  int nr = args[2]->Int32Value();
+  
+  /* (Local<Array>::Cast(args[n])->Get(r)) template*/
+
+  for(int r = 0; r < nr; r++){
+    if (!(Local<Array>::Cast(args[0])->Get(r))->IsInt32())
+      return TYPE_ERROR("fd must be a file descriptor");
+    if (!Buffer::HasInstance((Local<Array>::Cast(args[1])->Get(r))))
+      return TYPE_ERROR("Second argument needs to be a buffer");
+  }
+
+  iocb *controlblock[nr];
+  
+  for(int r = 0; r < nr; r++){
+    iocb *block = new iocb;
+    
+    int fd = (Local<Array>::Cast(args[0])->Get(r))->Int32Value();
+
+    size_t len;
+    int64_t pos;
+
+    char * buf = nullptr;
+    
+    Local<Object> buffer_obj = (Local<Array>::Cast(args[1])->Get(r))->ToObject(env->isolate());
+    char *buffer_data = Buffer::Data(buffer_obj);
+    size_t buffer_length = Buffer::Length(buffer_obj);
+
+    size_t off = (Local<Array>::Cast(args[3])->Get(r))->Int32Value();
+    if (off >= buffer_length) {
+      return env->ThrowError("Offset is out of bounds");
+    }
+
+    len = (Local<Array>::Cast(args[4])->Get(r))->Int32Value();
+    if (!Buffer::IsWithinBounds(off, len, buffer_length))
+      return env->ThrowRangeError("Length extends beyond buffer");
+
+    pos = GET_OFFSET((Local<Array>::Cast(args[5])->Get(r)));
+
+    buf = buffer_data + off;
+    
+    io_prep_pwrite(block, fd, buf, len, pos);
+	/* Expanding the macro 
+    	memset(block, 0, sizeof(*block));
+	block->aio_fildes = fd;
+	block->aio_lio_opcode = IO_CMD_PREAD;
+	block->aio_reqprio = 0;
+	block->u.c.buf = buf;
+	block->u.c.nbytes = len;
+	block->u.c.offset = pos; */
+    
+    controlblock[r] = block;
+  }
+
+  io_event *events = new io_event[nr];
+
+  io_context_t ctx;
+  ctx = 0;
+  io_setup(nr, &ctx);
+
+  io_submit(ctx, nr, controlblock);
+  
+  io_getevents(ctx, nr, nr, events, NULL);
+  
+  io_destroy(ctx);
+
+  for(int r = 0; r < nr; r++){
+    delete controlblock[r];
+  }
+  delete events;
+
+  return;
+}
+
 
 /*
  * Wrapper for read(2).
@@ -1609,6 +1703,7 @@ void InitFs(Local<Object> target,
   env->SetMethod(target, "symlink", Symlink);
   env->SetMethod(target, "readlink", ReadLink);
   env->SetMethod(target, "unlink", Unlink);
+  env->SetMethod(target, "writeBatch", WriteBatch);
   env->SetMethod(target, "writeBuffer", WriteBuffer);
   env->SetMethod(target, "writeBuffers", WriteBuffers);
   env->SetMethod(target, "writeString", WriteString);
